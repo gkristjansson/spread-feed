@@ -1,0 +1,31 @@
+[package]
+name = "spread-feed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version="*", features=["full"] }
+serde = { version="*", features = ["derive"]}
+futures-core = "0.3.26"
+tokio-stream = { version="0.1.11", features=["sync"]}
+futures = "0.3.26"
+clap = { version="4.1.6", features = ["derive", "env"]}
+rust_decimal = { version = "^1.14.2", features = ["maths"] }
+serde_json = "1.0.79"
+tokio-tungstenite = { version = "0.18.0", features = ["native-tls"] }
+tonic = "0.8"
+prost = "0.11"
+async-stream = "*"
+
+
+
+[build-dependencies]
+tonic-build = "0.8"
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
