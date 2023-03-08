@@ -1,4 +1,6 @@
 mod aggregator;
+mod iter_utils;
+mod venue_protocols;
 
 use std::pin::Pin;
 
@@ -33,7 +35,7 @@ impl OrderbookAggregator for Service {
     async fn book_summary(
         &self,
         _request: tonic::Request<Empty>,
-    ) -> Result<tonic::Response<Self::BookSummaryStream>, tonic::Status> {
+    ) -> Result<Response<Self::BookSummaryStream>, Status> {
         let rx = self.tx.subscribe();
         let mut stream = BroadcastStream::new(rx);
 
@@ -57,7 +59,7 @@ struct Args {
 async fn main() {
     let args: Args = Args::parse();
 
-    let (tx, _) = broadcast::channel(16);
+    let (tx, _rx) = broadcast::channel(16);
 
     let addr = "[::1]:10000".parse().unwrap();
 
@@ -66,7 +68,11 @@ async fn main() {
     let svc = OrderbookAggregatorServer::new(service);
 
     select! {
-        _ = Server::builder().add_service(svc).serve(addr) => {}
-       _ = aggregator::aggregator_task(args.symbol, tx) => {}
+        _ = Server::builder().add_service(svc).serve(addr) => {
+            println!("Server exited");
+        }
+       _ = aggregator::aggregator_task(args.symbol, tx) => {
+            println!("Aggregator exited");
+        }
     }
 }
