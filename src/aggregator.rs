@@ -1,15 +1,15 @@
 use std::{cmp::Ordering, error::Error};
 
-use futures::{SinkExt, StreamExt};
+use futures::{future::Either, SinkExt, StreamExt};
 use rust_decimal::{prelude::ToPrimitive, Decimal};
 use tokio::{select, sync::broadcast::Sender};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::service::{Level as SummaryLevel, Summary};
-
-type Price = Decimal;
-type Qty = Decimal;
-type Level = (Price, Qty);
+use crate::{
+    iter_utils::OrderedChainExt,
+    service::{Level as SummaryLevel, Summary},
+    venue_protocols::*,
+};
 
 #[derive(Default)]
 struct Book {
@@ -17,119 +17,30 @@ struct Book {
     asks: Vec<Level>,
 }
 
-mod bitstamp {
-    use serde::Deserialize;
-    use serde_json::json;
-
-    use crate::aggregator::{Price, Qty};
-
-    #[derive(Deserialize, Debug)]
-    pub struct BookUpdate {
-        pub bids: Vec<(Price, Qty)>,
-        pub asks: Vec<(Price, Qty)>,
-    }
-
-    #[derive(Deserialize, Debug)]
-    #[serde(tag = "event", rename_all = "snake_case")]
-    pub enum FeedMessage {
-        #[serde(rename = "bts:subscription_succeeded")]
-        SubscriptionSucceeded {
-            channel: String,
-        },
-
-        #[serde(rename = "bts:error")]
-        Error {
-            code: u64,
-            message: String,
-        },
-
-        Data {
-            channel: String,
-            data: BookUpdate,
-        },
-    }
-
-    pub fn make_subscription_payload(symbol: &str) -> String {
-        json!({
-            "event": "bts:subscribe",
-            "data": {
-                "channel": format!("order_book_{symbol}")
-            }
-        })
-        .to_string()
-    }
-}
-
-mod binance {
-    use serde::Deserialize;
-
-    use crate::aggregator::{Price, Qty};
-
-    #[derive(Deserialize, Debug)]
-    pub struct BookUpdate {
-        pub bids: Vec<(Price, Qty)>,
-        pub asks: Vec<(Price, Qty)>,
-    }
-}
-
-fn aggerate_levels<F>(
+fn aggregate_levels(
     bitstamp_levels: &[Level],
     binance_levels: &[Level],
-    cmp: F,
-) -> Vec<SummaryLevel>
-where
-    F: Fn(&Price, &Price) -> Ordering,
-{
-    let mut ret = vec![];
-    let mut bitstamp_it = bitstamp_levels.iter().peekable();
-    let mut binance_it = binance_levels.iter().peekable();
-
-    let make_level = |exchange: &str, px: &Price, qty: &Qty| SummaryLevel {
+    cmp: Ordering,
+) -> Vec<SummaryLevel> {
+    let make_summary_level = |exchange: &str, price: &Decimal, qty: &Decimal| SummaryLevel {
         exchange: exchange.to_string(),
-        price: px.to_f64().unwrap(),
+        price: price.to_f64().unwrap(),
         amount: qty.to_f64().unwrap(),
     };
 
-    while ret.len() < 10 {
-        match (bitstamp_it.peek(), binance_it.peek()) {
-            (Some((px, qty)), None) => {
-                ret.push(make_level("bitstamp", px, qty));
-                bitstamp_it.next();
-            }
-            (None, Some((px, qty))) => {
-                ret.push(make_level("binance", px, qty));
-                binance_it.next();
-            }
-            (Some((bitstamp_px, bitstamp_qty)), Some((binance_px, binance_qty))) => {
-                match cmp(bitstamp_px, binance_px) {
-                    Ordering::Less => {
-                        ret.push(make_level("bitstamp", bitstamp_px, bitstamp_qty));
-                        bitstamp_it.next();
-                    }
-                    Ordering::Equal => {
-                        if bitstamp_qty > binance_qty {
-                            ret.push(make_level("bitstamp", bitstamp_px, bitstamp_qty));
-                            bitstamp_it.next();
-                        } else {
-                            ret.push(make_level("binance", binance_px, binance_qty));
-                            binance_it.next();
-                        }
-                    }
-                    Ordering::Greater => {
-                        ret.push(make_level("binance", binance_px, binance_qty));
-                        binance_it.next();
-                    }
-                }
-            }
-            (None, None) => break,
-        }
-    }
-
-    ret
+    bitstamp_levels
+        .iter()
+        .ordered_chain(binance_levels.iter(), cmp)
+        .map(|level| match level {
+            Either::Left((price, qty)) => make_summary_level("bitstamp", price, qty),
+            Either::Right((price, qty)) => make_summary_level("binance", price, qty),
+        })
+        .take(10)
+        .collect()
 }
 
 pub async fn aggregator_task(symbol: String, tx: Sender<Summary>) -> Result<(), Box<dyn Error>> {
-    let (mut bitstamp_ws, _) = tokio_tungstenite::connect_async("wss://ws.bitstamp.net.").await?;
+    let (mut bitstamp_ws, _) = tokio_tungstenite::connect_async("wss://ws.bitstamp.net.").await.expect("Failed to connect to bitstamp websocket");
 
     let subscription_message = bitstamp::make_subscription_payload(&symbol);
     bitstamp_ws
@@ -201,10 +112,8 @@ pub async fn aggregator_task(symbol: String, tx: Sender<Summary>) -> Result<(), 
             }
         }
 
-        let bids = aggerate_levels(&bitstamp_book.bids, &binance_book.bids, |a, b| {
-            a.cmp(b).reverse()
-        });
-        let asks = aggerate_levels(&bitstamp_book.asks, &binance_book.asks, |a, b| a.cmp(b));
+        let bids = aggregate_levels(&bitstamp_book.bids, &binance_book.bids, Ordering::Greater);
+        let asks = aggregate_levels(&bitstamp_book.asks, &binance_book.asks, Ordering::Less);
 
         if bids.is_empty() || asks.is_empty() {
             // We can't publish a spread since the book is one-sided.
@@ -215,4 +124,6 @@ pub async fn aggregator_task(symbol: String, tx: Sender<Summary>) -> Result<(), 
 
         tx.send(Summary { bids, asks, spread })?;
     }
+
+
 }
