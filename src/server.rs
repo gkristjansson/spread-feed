@@ -68,11 +68,11 @@ async fn main() {
     let svc = OrderbookAggregatorServer::new(service);
 
     select! {
-        _ = Server::builder().add_service(svc).serve(addr) => {
-            println!("Server exited");
+        e = Server::builder().add_service(svc).serve(addr) => {
+            println!("Server exited, {:?}", e);
         }
-       _ = aggregator::aggregator_task(args.symbol, tx) => {
-            println!("Aggregator exited");
+       e = aggregator::aggregator_task(args.symbol, tx) => {
+            println!("Aggregator exited, {:?}", e);
         }
     }
 }
